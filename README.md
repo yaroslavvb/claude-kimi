@@ -55,11 +55,27 @@ Each was found by testing, Sun 11 Oct 2026:
 ### sessionpipe
 
 `claude-kimi setup` copies the hooks from `~/.claude/settings.json` (sessionpipe's 14 Claude Code events)
-into the Kimi home. sessionpipe's installer also finds the home by itself (it globs `~/.claude[-_.]*`) and
+into the Kimi home, along with that machine's permission defaults (`allow`, `defaultMode`, `disableAutoMode`). sessionpipe's installer also finds the home by itself (it globs `~/.claude[-_.]*`) and
 keeps its hooks current there; `sessionpipe status` lists `~/.claude-kimi-modal/settings.json  current`.
 Verified on the M5: a Kimi session's events reach the outbox and the spacesheep sink. A session resumed with
 plain `claude` and `CLAUDE_CONFIG_DIR=~/.claude-kimi-modal`, and no wrapper, still runs on Kimi and remembers
 its context. That is the path sessionpipe's control daemon takes when he messages a session from the board.
+
+### From the spacesheep board
+
+A Kimi session can be messaged from [spacesheep.dev/sessions](https://spacesheep.dev/sessions) when it runs
+on a machine whose sessionpipe control is paired (the M5 and the Intel, not mordast yet), in a folder that
+machine allows (`~/git0` or `~/git` on the Macs). To start one:
+
+```bash
+cd ~/git0/claude-kimi && claude-kimi -p "Kimi session for the board: say hello"
+```
+
+Each board message runs `claude -p --permission-mode auto --resume <id>` in that folder, with the session's
+own config home. The home's `settings.json` makes that a Kimi turn, and auto mode's permission classifier
+runs on Kimi too. Tested Sun 11 Oct 2026 with the daemon's launchd environment: Bash ran, and the resumed
+session still had its context. Keep a board session out of an open TUI, so two processes never write one
+transcript.
 
 ### What doesn't work
 

@@ -107,7 +107,8 @@ s["env"] = {**s.get("env", {}),
 # also finds this home (it globs ~/.claude[-_.]*) and merges its hooks here on each update.
 if "hooks" in base_settings: s["hooks"] = base_settings["hooks"]
 perms = s.setdefault("permissions", {})
-for k in ("allow", "defaultMode"):
+# disableAutoMode too: without it a 2.1.296 TUI on a bypass box opens on "Make auto mode your default?" (mordast)
+for k in ("allow", "defaultMode", "disableAutoMode"):
     if k in base_settings.get("permissions", {}) and k not in perms: perms[k] = base_settings["permissions"][k]
 for k in ("theme", "agentPushNotifEnabled"):
     if k in base_settings and k not in s: s[k] = base_settings[k]
