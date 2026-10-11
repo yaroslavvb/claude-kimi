@@ -1,0 +1,5 @@
+endpoint.env
+*.env
+!endpoint.env.example
+.claude/
+__pycache__/

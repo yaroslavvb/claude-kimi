@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# claude-kimi: Claude Code sessions whose model is Kimi K3 on his own Modal endpoint.
+#
+# The agent is Claude Code itself (same TUI, tools, subagents, /resume, transcripts, hooks), so a Kimi session
+# behaves like any other Claude session: it lives in tmux and sessionpipe's hooks fire in it. Only the model
+# behind it changes. That works because the Modal endpoint is SGLang, and SGLang serves Anthropic's Messages
+# API at /v1/messages, so no translation proxy is needed. The pieces:
+#
+#   config home   ~/.claude-kimi-modal (CLAUDE_CONFIG_DIR). Its settings.json carries the endpoint in its `env`
+#                 block, so anything that starts claude on this home talks to Kimi. That includes sessionpipe's
+#                 daemon resuming a session from the board, which knows nothing about this wrapper.
+#   endpoint      ~/.config/claude-kimi/endpoint.env (0600, never in git): KIMI_BASE_URL, MODAL_KEY, MODAL_SECRET.
+#                 The Modal proxy-auth pair travels as ANTHROPIC_CUSTOM_HEADERS. ANTHROPIC_AUTH_TOKEN is a
+#                 placeholder that Modal ignores, so this home never holds or sends a claude.ai login.
+#   tmux          session `kimi-modal`, one window per folder.
+#
+# Three things Claude Code needs to work with this endpoint (found Sun 11 Oct 2026, CLI 2.1.286 and 2.1.296):
+#   1. Keep Claude's model names. The CLI rejects names it does not know before sending anything
+#      ("[claude-code:unrecognized_model] {"model":"moonshotai/Kimi-K3"}"), and the endpoint serves Kimi K3
+#      whatever `model` says. So /model still reads "Opus" and still means Kimi.
+#   2. Effort low|high|max only. Kimi K3 answers 400 to Claude Code's default "medium" (and to "xhigh"), so the
+#      home pins CLAUDE_CODE_EFFORT_LEVEL (default high; CLAUDE_KIMI_EFFORT to change it).
+#   3. A parent's environment wins over settings.json. A claude started from another Claude session, the desktop
+#      app or a tmux server one of them started inherits ANTHROPIC_BASE_URL and friends, and those beat the
+#      home's settings: requests went to Anthropic with the placeholder token ("401 Invalid bearer token").
+#      So the wrapper drops every inherited ANTHROPIC_* / CLAUDE_CODE_* variable and sets its own.
+#
+# Not available: Remote Control (it needs a claude.ai login, which this home deliberately lacks), and the
+# Anthropic server-side tools (WebSearch). Everything that runs locally works, including subagents and MCP.
+#
+#   claude-kimi [CLAUDE ARGS...]   run Claude Code on Kimi in this terminal (any claude flag, e.g. -p, --resume)
+#   claude-kimi install            link this script into ~/.local/bin, then `setup`
+#   claude-kimi setup              (re)write the config home from endpoint.env and this machine's ~/.claude settings
+#   claude-kimi check              talk to the endpoint directly: models, one message, one tool call (no claude)
+#   claude-kimi selftest           one headless Claude Code turn that uses Read, Bash and a subagent
+#   claude-kimi tmux [DIR]         a Kimi session in tmux session `kimi-modal`, in DIR (default: the current
+#                                  folder): a new window if the session exists, else a new session. Attaches when
+#                                  run from a terminal.
+#   claude-kimi trust DIR          accept the folder-trust question for DIR in the Kimi home
+#   claude-kimi status             home, endpoint host (no secrets), tmux windows, running Kimi sessions
+set -uo pipefail
+
+KIMI_HOME=${CLAUDE_KIMI_HOME:-$HOME/.claude-kimi-modal}
+ENDPOINT_ENV=${CLAUDE_KIMI_ENDPOINT:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-kimi/endpoint.env}
+TMUX_SESSION=${CLAUDE_KIMI_TMUX:-kimi-modal}
+EFFORT=${CLAUDE_KIMI_EFFORT:-high}
+MODE=${CLAUDE_KIMI_PERMISSION_MODE:-bypassPermissions}   # the lab boxes' convention: tmux sessions start in bypass
+PLACEHOLDER_TOKEN=unused-modal-auth-is-in-custom-headers
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/snap/bin:$PATH"
+
+die() { echo "claude-kimi: $*" >&2; exit 1; }
+self() { python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}"; }
+
+load_endpoint() {  # KIMI_BASE_URL, MODAL_KEY, MODAL_SECRET from the 0600 file, without exporting them
+  [[ -r $ENDPOINT_ENV ]] || die "no $ENDPOINT_ENV: copy endpoint.env.example from the repo there and chmod 600"
+  local k v
+  while IFS='=' read -r k v; do
+    case $k in KIMI_BASE_URL|MODAL_KEY|MODAL_SECRET) printf -v "$k" '%s' "$v" ;; esac
+  done < <(grep -E '^(KIMI_BASE_URL|MODAL_KEY|MODAL_SECRET)=' "$ENDPOINT_ENV")
+  [[ -n ${KIMI_BASE_URL:-} && -n ${MODAL_KEY:-} && -n ${MODAL_SECRET:-} ]] ||
+    die "$ENDPOINT_ENV must set KIMI_BASE_URL, MODAL_KEY and MODAL_SECRET"
+  KIMI_BASE_URL=${KIMI_BASE_URL%/}; KIMI_BASE_URL=${KIMI_BASE_URL%/v1}   # Claude Code appends /v1/messages itself
+}
+
+scrub_env() {  # what a parent Claude exported; see point 3 in the header
+  local v
+  for v in $(compgen -e); do
+    case $v in
+      ANTHROPIC_*|CLAUDE_CODE_*|CLAUDECODE|CLAUDE_EFFORT|CLAUDE_AGENT_SDK_*|CLAUDE_PID|CLAUDE_CONFIG_DIR|AI_AGENT) unset "$v" ;;
+    esac
+  done
+}
+
+kimi_env() {  # the environment a Kimi claude runs with, as the process's own (it outranks settings.json)
+  load_endpoint
+  scrub_env
+  export CLAUDE_CONFIG_DIR=$KIMI_HOME
+  export ANTHROPIC_BASE_URL=$KIMI_BASE_URL
+  export ANTHROPIC_AUTH_TOKEN=$PLACEHOLDER_TOKEN
+  export ANTHROPIC_CUSTOM_HEADERS=$'Modal-Key: '"$MODAL_KEY"$'\nModal-Secret: '"$MODAL_SECRET"
+  export CLAUDE_CODE_EFFORT_LEVEL=$EFFORT
+  export API_TIMEOUT_MS=3000000
+}
+
+cmd_setup() {
+  load_endpoint
+  umask 077
+  mkdir -p "$KIMI_HOME" && chmod 700 "$KIMI_HOME"
+  python3 -I - "$KIMI_HOME" "$HOME" "$KIMI_BASE_URL" "$MODAL_KEY" "$MODAL_SECRET" "$EFFORT" "$PLACEHOLDER_TOKEN" <<'PY'
+import json, os, sys
+home_dir, user_home, base, key, secret, effort, placeholder = sys.argv[1:]
+def load(p):
+    try:
+        with open(p) as f: return json.load(f)
+    except (OSError, ValueError): return {}
+path = os.path.join(home_dir, "settings.json")
+s = load(path)
+base_settings = load(os.path.join(user_home, ".claude", "settings.json"))   # this machine's account-1 settings
+s["env"] = {**s.get("env", {}),
+    "ANTHROPIC_BASE_URL": base,
+    "ANTHROPIC_AUTH_TOKEN": placeholder,
+    "ANTHROPIC_CUSTOM_HEADERS": f"Modal-Key: {key}\nModal-Secret: {secret}",
+    "CLAUDE_CODE_EFFORT_LEVEL": effort,
+    "API_TIMEOUT_MS": "3000000"}
+# The hooks (sessionpipe's, wherever it is installed) come from ~/.claude/settings.json on every setup, so a
+# Kimi session reaches the same board as every other session on this machine. sessionpipe's own installer
+# also finds this home (it globs ~/.claude[-_.]*) and merges its hooks here on each update.
+if "hooks" in base_settings: s["hooks"] = base_settings["hooks"]
+perms = s.setdefault("permissions", {})
+for k in ("allow", "defaultMode"):
+    if k in base_settings.get("permissions", {}) and k not in perms: perms[k] = base_settings["permissions"][k]
+for k in ("theme", "agentPushNotifEnabled"):
+    if k in base_settings and k not in s: s[k] = base_settings[k]
+s["skipDangerousModePermissionPrompt"] = True
+with open(path, "w") as f: json.dump(s, f, indent=2); f.write("\n")
+os.chmod(path, 0o600)
+g_path = os.path.join(home_dir, ".claude.json")
+g = load(g_path)
+g["hasCompletedOnboarding"] = True
+with open(g_path, "w") as f: json.dump(g, f, indent=2); f.write("\n")
+os.chmod(g_path, 0o600)
+print(f"{home_dir}: settings.json written ({len(s.get('hooks', {}))} hook events, effort {effort}), endpoint {base}")
+PY
+}
+
+settings_stale() {  # endpoint.env changed (a rotated key) since settings.json was written
+  [[ ! -f $KIMI_HOME/settings.json || $ENDPOINT_ENV -nt $KIMI_HOME/settings.json ]]
+}
+
+cmd_trust() {
+  local dir
+  dir=$(cd "${1:?folder}" && pwd -P) || die "no folder $1"
+  python3 -I - "$KIMI_HOME/.claude.json" "$dir" <<'PY'
+import json, os, sys
+p, d = sys.argv[1:]
+try: g = json.load(open(p))
+except (OSError, ValueError): g = {}
+g.setdefault("projects", {}).setdefault(d, {})["hasTrustDialogAccepted"] = True
+with open(p, "w") as f: json.dump(g, f, indent=2); f.write("\n")
+os.chmod(p, 0o600)
+PY
+}
+
+cmd_install() {
+  local me
+  me=$(self)
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$me" "$HOME/.local/bin/claude-kimi" && echo "linked ~/.local/bin/claude-kimi -> $me"
+  cmd_setup
+}
+
+cmd_check() {  # the endpoint alone, with curl: separates "Modal is down" from "Claude Code is misconfigured"
+  load_endpoint
+  local hdr
+  hdr=$(printf 'header = "Modal-Key: %s"\nheader = "Modal-Secret: %s"\n' "$MODAL_KEY" "$MODAL_SECRET")
+  echo "endpoint ${KIMI_BASE_URL#https://}"
+  curl -sS -m 300 -K - "$KIMI_BASE_URL/v1/models" -w '\n%{http_code} %{time_total}' <<< "$hdr" | report models
+  curl -sS -m 300 -K - "$KIMI_BASE_URL/v1/messages" -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+    -d '{"model":"claude-opus-5-5","max_tokens":400,"messages":[{"role":"user","content":"Reply with exactly: ok"}]}' \
+    -w '\n%{http_code} %{time_total}' <<< "$hdr" | report message
+  curl -sS -m 300 -K - "$KIMI_BASE_URL/v1/messages" -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+    -d '{"model":"claude-opus-5-5","max_tokens":800,"tools":[{"name":"get_time","description":"Current time in a city","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}],"messages":[{"role":"user","content":"What time is it in Paris? Use the tool."}]}' \
+    -w '\n%{http_code} %{time_total}' <<< "$hdr" | report tool_use
+}
+
+report() {  # report KIND < curl output with "\n<status> <seconds>" appended: one line per check
+  python3 -I -c '
+import json, sys
+kind = sys.argv[1]
+raw = sys.stdin.read()
+body, _, status = raw.rpartition("\n")
+code, secs = (status.split() + ["?", "0"])[:2]
+head = "  %-9s HTTP %s %6.2fs  " % (kind, code, float(secs))
+try:
+    d = json.loads(body)
+    if kind == "models":
+        line = ", ".join("%s (%s ctx)" % (m["id"], m.get("context_length", "?")) for m in d["data"])
+    elif kind == "message":
+        text = "".join(c.get("text", "") for c in d["content"] if c["type"] == "text")
+        line = "served by %s, text %r, usage %s" % (d.get("model"), text, d.get("usage"))
+    else:
+        calls = [(c["name"], c["input"]) for c in d["content"] if c["type"] == "tool_use"]
+        line = "stop %s, calls %s" % (d.get("stop_reason"), calls)
+except (ValueError, KeyError, TypeError):
+    line = body[:300]
+print(head + line)' "$1"
+}
+
+cmd_selftest() {
+  local dir out
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/claude-kimi-selftest.XXXXXX") || die "mktemp failed"
+  echo hello-from-kimi > "$dir/note.txt"
+  cmd_trust "$dir"
+  out=$( (kimi_env; cd "$dir" && claude -p "Use the Read tool to read note.txt, run 'uname -s' with the Bash tool, and use a subagent (the Agent tool) to count the files in this folder. Then reply with one line: file contents | uname output | file count." \
+            --output-format json --dangerously-skip-permissions < /dev/null) 2>&1)
+  rm -rf "${dir:?}"
+  python3 -c '
+import json, sys
+raw = sys.argv[1]
+try: d = json.loads(raw)
+except ValueError: print("FAIL (not JSON):", raw[:600]); sys.exit(1)
+ok = not d.get("is_error") and "hello-from-kimi" in (d.get("result") or "")
+print("PASS" if ok else "FAIL", "%s turns, %.1fs:" % (d.get("num_turns"), (d.get("duration_ms") or 0) / 1000.0), repr(d.get("result"))[:300])
+print("session", d.get("session_id"), "in", sys.argv[2])
+sys.exit(0 if ok else 1)' "$out" "$KIMI_HOME"
+}
+
+perm_flags() {
+  if [[ $MODE == bypassPermissions ]]; then echo --dangerously-skip-permissions; else echo "--permission-mode $MODE"; fi
+}
+
+cmd_tmux() {
+  local dir name run
+  command -v tmux > /dev/null || die "no tmux"
+  dir=$(cd "${1:-$PWD}" && pwd -P) || die "no folder ${1:-}"
+  cmd_trust "$dir"
+  name=$(basename "$dir")
+  # the window runs this script, never bare `claude`: a tmux server keeps the environment of whoever started it
+  run="$(printf %q "$(self)") $(perm_flags); exec \"\${SHELL:-bash}\" -l"
+  if tmux has-session -t "=$TMUX_SESSION" 2> /dev/null; then
+    tmux new-window -t "=$TMUX_SESSION:" -n "$name" -c "$dir" "$run"
+  else
+    tmux new-session -d -s "$TMUX_SESSION" -n "$name" -x 200 -y 50 -c "$dir" "$run"
+  fi
+  tmux set-environment -t "=$TMUX_SESSION" CLAUDE_CONFIG_DIR "$KIMI_HOME"
+  echo "Kimi session in tmux $TMUX_SESSION:$name ($dir). Attach: tmux attach -t '=$TMUX_SESSION'"
+  if [[ -t 0 && -t 1 && -z ${TMUX:-} ]]; then exec tmux attach -t "=$TMUX_SESSION"; fi
+}
+
+cmd_status() {
+  load_endpoint
+  echo "home      $KIMI_HOME$([[ -f $KIMI_HOME/settings.json ]] || echo '  (missing: claude-kimi setup)')"
+  echo "endpoint  ${KIMI_BASE_URL#https://}  (keys in $ENDPOINT_ENV)"
+  settings_stale && echo "          settings.json is older than endpoint.env: run claude-kimi setup"
+  echo "effort    $EFFORT"
+  if tmux has-session -t "=$TMUX_SESSION" 2> /dev/null; then
+    echo "tmux      $TMUX_SESSION:"
+    tmux list-windows -t "=$TMUX_SESSION" -F '            #{window_index} #{window_name}  #{pane_current_command}  #{pane_current_path}'
+  else
+    echo "tmux      no session $TMUX_SESSION (claude-kimi tmux [DIR])"
+  fi
+}
+
+case ${1:-} in
+  install|setup|check|selftest|tmux|trust|status) c=$1; shift; "cmd_$c" "$@" ;;
+  help|-h|--help) sed -n '2,/^set -uo/p' "$(self)" | sed '$d; s/^# \{0,1\}//' ;;
+  *)
+    settings_stale && cmd_setup > /dev/null
+    kimi_env
+    exec claude "$@"
+    ;;
+esac
