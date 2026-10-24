@@ -16,8 +16,12 @@ chmod 600 ~/.config/claude-kimi/endpoint.env && $EDITOR ~/.config/claude-kimi/en
 ~/git0/claude-kimi/bin/claude-kimi install    # links ~/.local/bin/claude-kimi, writes ~/.claude-kimi-modal
 claude-kimi check                             # the endpoint alone: models, one message, one tool call
 claude-kimi selftest                          # one headless Claude Code turn: Read, Bash, a subagent
-claude-kimi tmux ~/some/folder                # a Kimi session in tmux session `kimi-modal`
+claude-kimi tmux ~/some/folder                # a Kimi session in tmux session `claude-kimi`
+( crontab -l; echo "* * * * * $HOME/.local/bin/claude-kimi up >> $HOME/.config/claude-kimi/up.log 2>&1 # claude-kimi keepalive" ) | crontab -
 ```
+
+The last line is optional. It brings the tmux session back within a minute whenever it is missing, for example
+after a tmux restart, starting it in this repo's folder.
 
 `claude-kimi` with no subcommand is `claude` on Kimi, so every claude flag works: `claude-kimi -p "…"`,
 `claude-kimi --resume`, `claude-kimi --dangerously-skip-permissions`. `claude-kimi help` prints the full usage.
@@ -31,7 +35,7 @@ thinking blocks and tool use. So Claude Code can talk to it directly, with no tr
 |---|---|---|
 | config home | `~/.claude-kimi-modal` | `CLAUDE_CONFIG_DIR` for every Kimi session. Its `settings.json` `env` block carries the endpoint, so anything that starts `claude` on this home talks to Kimi, including sessionpipe's daemon resuming a session from the board. Transcripts live in its `projects/`. |
 | endpoint | `~/.config/claude-kimi/endpoint.env` (0600, never in git) | `KIMI_BASE_URL`, `MODAL_KEY`, `MODAL_SECRET`. The Modal proxy-auth pair travels as `ANTHROPIC_CUSTOM_HEADERS`. `ANTHROPIC_AUTH_TOKEN` is a placeholder that Modal ignores, so the home never holds or sends a claude.ai login. |
-| tmux | session `kimi-modal` | one window per folder, started in bypass-permissions mode like the lab boxes' sessions (`CLAUDE_KIMI_PERMISSION_MODE` changes it) |
+| tmux | session `claude-kimi` | one window per folder, started in bypass-permissions mode like the lab boxes' sessions (`CLAUDE_KIMI_PERMISSION_MODE` changes it). Named like his account sessions (`claude-<key>`) since Fri 23 Oct 2026; it was `kimi-modal` before. |
 
 Rotate the key by editing `endpoint.env`. The next `claude-kimi` run sees the file is newer than the home's
 `settings.json` and rewrites it. Running `claude-kimi setup` does the same by hand.
@@ -54,8 +58,10 @@ Each was found by testing, Sun 11 Oct 2026:
 
 ### sessionpipe
 
-`claude-kimi setup` copies the hooks from `~/.claude/settings.json` (sessionpipe's 14 Claude Code events)
-into the Kimi home, along with that machine's permission defaults (`allow`, `defaultMode`, `disableAutoMode`). sessionpipe's installer also finds the home by itself (it globs `~/.claude[-_.]*`) and
+`claude-kimi setup` copies the hooks from `~/.claude/settings.json` (sessionpipe's 14 Claude Code events, the
+`<ai>` tag guard and the shell guards) into the Kimi home, along with that machine's permission defaults (`allow`, `defaultMode`, `disableAutoMode`).
+It leaves out `memory-store-guard.sh` (since Fri 23 Oct 2026): that guard moves memory writes into the accounts'
+shared store, and this home keeps its own memory by design. sessionpipe's installer also finds the home by itself (it globs `~/.claude[-_.]*`) and
 keeps its hooks current there; `sessionpipe status` lists `~/.claude-kimi-modal/settings.json  current`.
 Verified on the M5: a Kimi session's events reach the outbox and the spacesheep sink. A session resumed with
 plain `claude` and `CLAUDE_CONFIG_DIR=~/.claude-kimi-modal`, and no wrapper, still runs on Kimi and remembers
@@ -64,8 +70,8 @@ its context. That is the path sessionpipe's control daemon takes when he message
 ### From the spacesheep board
 
 A Kimi session can be messaged from [spacesheep.dev/sessions](https://spacesheep.dev/sessions) when it runs
-on a machine whose sessionpipe control is paired (the M5 and the Intel, not mordast yet), in a folder that
-machine allows (`~/git0` or `~/git` on the Macs). To start one:
+on a machine whose sessionpipe control is paired (the M5, the Intel, and mordast since Tue 13 Oct 2026), in a
+folder that machine allows (`~/git0` or `~/git` on the Macs; `~/claude-kimi` among mordast's). To start one:
 
 ```bash
 cd ~/git0/claude-kimi && claude-kimi -p "Kimi session for the board: say hello"
@@ -82,7 +88,7 @@ transcript.
 - **Remote Control** (`claude remote-control`, the Claude phone app). It refuses with "Remote Control is only
   available with claude.ai subscriptions". Signing this home in to claude.ai would make Claude Code send that
   claude.ai token to the Modal endpoint with every request, so it stays signed out. Reach Kimi sessions
-  remotely through the sessionpipe board on a paired machine, or by ssh plus `tmux attach -t '=kimi-modal'`.
+  remotely through the sessionpipe board on a paired machine, or by ssh plus `tmux attach -t '=claude-kimi'`.
 - **WebSearch** and other Anthropic server-side tools. WebFetch works: it fetches locally and summarises with Kimi.
 - `/model` choices are labels. All of them are Kimi K3.
 
@@ -110,19 +116,20 @@ server without `/v1/messages`, put a translation proxy in front of it and keep e
 
 ## Cost
 
-The `kimi-k3` endpoint is a Modal Managed/Auto Endpoint, billed by GPU-second while its container runs, not
-per token (see `~/git0/kimi-k3-serving/README.md`). A Claude Code session sends large prompts: the system
-prompt plus tool definitions come to about 130 KB per request. That is fine on a per-GPU-second bill. Idle GPU
-time costs money even with no sessions; stopping the endpoint in the Modal dashboard is what stops that.
-The public console's $100 meter does not see these requests: they go to the raw endpoint, not through the
-console.
+The live `kimi-k3` endpoint (`ep-mEw0EalWSYkHJ3GB6SrVKk`, created 6 Sep 2026) is **Shared**, billed per token:
+$3 per million input tokens, $0.30 cached, $15 completion (`modal endpoint info … --json` reads
+`"serving_mode": "shared"`; corrected Tue 13 Oct 2026, when this section still said GPU-seconds). There is no
+idle bill. A Claude Code session sends large prompts: the system prompt plus tool definitions come to about
+130 KB per request, so the cached-input rate does most of the work. `ep-aRzRWPCdQ0I0gaRxvlp6r6`, also named
+`kimi-k3`, is the July endpoint, stopped 6 Sep; its dashboard page still opens but it serves nothing. The
+public console's $100 meter does not see these requests: they go to the raw endpoint, not through the console.
 
 ## Machines
 
 | machine | installed | tmux |
 |---|---|---|
-| M5 (`m5-mbp`) | `~/git0/claude-kimi` (Dropbox), `~/.local/bin/claude-kimi` | `kimi-modal`, for testing |
-| mordast (nekko.ai) | `~/claude-kimi` (git clone) | `kimi-modal` |
+| M5 (`m5-mbp`) | `~/git0/claude-kimi` (Dropbox), `~/.local/bin/claude-kimi` | `kimi-modal`, for testing (the old name, while that session lasts; the next `claude-kimi tmux` opens `claude-kimi`) |
+| mordast (nekko.ai) | `~/claude-kimi` (git clone, updated by bundle over ssh) | `claude-kimi`, kept up by the cron keepalive since Fri 23 Oct 2026 |
 
 On mordast, Roman's vault terms bind Kimi sessions like any other agent: no session reads the Esperanto
 archive unless he asks for it, and nothing from it leaves for people outside the company.

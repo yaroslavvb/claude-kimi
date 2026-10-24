@@ -12,7 +12,9 @@
 #   endpoint      ~/.config/claude-kimi/endpoint.env (0600, never in git): KIMI_BASE_URL, MODAL_KEY, MODAL_SECRET.
 #                 The Modal proxy-auth pair travels as ANTHROPIC_CUSTOM_HEADERS. ANTHROPIC_AUTH_TOKEN is a
 #                 placeholder that Modal ignores, so this home never holds or sends a claude.ai login.
-#   tmux          session `kimi-modal`, one window per folder.
+#   tmux          session `claude-kimi`, one window per folder, named like his account sessions (claude-<key>).
+#                 It was `kimi-modal` until Fri 23 Oct 2026, when he asked for it by this name on mordast, the
+#                 morning's tmux restart there having taken the old one. `claude-kimi up` in cron brings it back.
 #
 # Three things Claude Code needs to work with this endpoint (found Sun 11 Oct 2026, CLI 2.1.286 and 2.1.296):
 #   1. Keep Claude's model names. The CLI rejects names it does not know before sending anything
@@ -33,16 +35,18 @@
 #   claude-kimi setup              (re)write the config home from endpoint.env and this machine's ~/.claude settings
 #   claude-kimi check              talk to the endpoint directly: models, one message, one tool call (no claude)
 #   claude-kimi selftest           one headless Claude Code turn that uses Read, Bash and a subagent
-#   claude-kimi tmux [DIR]         a Kimi session in tmux session `kimi-modal`, in DIR (default: the current
+#   claude-kimi tmux [DIR]         a Kimi session in tmux session `claude-kimi`, in DIR (default: the current
 #                                  folder): a new window if the session exists, else a new session. Attaches when
 #                                  run from a terminal.
+#   claude-kimi up                 the keepalive: if the tmux session is missing, start it in this repo's folder
+#                                  (CLAUDE_KIMI_DIR to change it); silent while it runs. For cron, every minute.
 #   claude-kimi trust DIR          accept the folder-trust question for DIR in the Kimi home
 #   claude-kimi status             home, endpoint host (no secrets), tmux windows, running Kimi sessions
 set -uo pipefail
 
 KIMI_HOME=${CLAUDE_KIMI_HOME:-$HOME/.claude-kimi-modal}
 ENDPOINT_ENV=${CLAUDE_KIMI_ENDPOINT:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-kimi/endpoint.env}
-TMUX_SESSION=${CLAUDE_KIMI_TMUX:-kimi-modal}
+TMUX_SESSION=${CLAUDE_KIMI_TMUX:-claude-kimi}
 EFFORT=${CLAUDE_KIMI_EFFORT:-high}
 MODE=${CLAUDE_KIMI_PERMISSION_MODE:-bypassPermissions}   # the lab boxes' convention: tmux sessions start in bypass
 PLACEHOLDER_TOKEN=unused-modal-auth-is-in-custom-headers
@@ -105,7 +109,19 @@ s["env"] = {**s.get("env", {}),
 # The hooks (sessionpipe's, wherever it is installed) come from ~/.claude/settings.json on every setup, so a
 # Kimi session reaches the same board as every other session on this machine. sessionpipe's own installer
 # also finds this home (it globs ~/.claude[-_.]*) and merges its hooks here on each update.
-if "hooks" in base_settings: s["hooks"] = base_settings["hooks"]
+# All but memory-store-guard (Fri 23 Oct 2026): it sends memory writes to the accounts' shared store, and this
+# home keeps its own memory by design (flush-util claude_memory and claude_config_parity exempt it by name).
+# The <ai> tag hook comes along, which matters where gh is signed in as him (mordast).
+def without_memory_guard(hooks):
+    out = {}
+    for event, groups in hooks.items():
+        kept = []
+        for g in groups:
+            hs = [h for h in g.get("hooks", []) if "memory-store-guard" not in h.get("command", "")]
+            if hs: kept.append(dict(g, hooks=hs))
+        if kept: out[event] = kept
+    return out
+if "hooks" in base_settings: s["hooks"] = without_memory_guard(base_settings["hooks"])
 perms = s.setdefault("permissions", {})
 # disableAutoMode too: without it a 2.1.296 TUI on a bypass box opens on "Make auto mode your default?" (mordast)
 for k in ("allow", "defaultMode", "disableAutoMode"):
@@ -228,6 +244,14 @@ cmd_tmux() {
   if [[ -t 0 && -t 1 && -z ${TMUX:-} ]]; then exec tmux attach -t "=$TMUX_SESSION"; fi
 }
 
+cmd_up() {  # cron's keepalive: a tmux restart takes the session with it (mordast, Fri 23 Oct 2026 10:35)
+  command -v tmux > /dev/null || die "no tmux"
+  tmux has-session -t "=$TMUX_SESSION" 2> /dev/null && return 0
+  echo "$(date '+%F %T') no tmux session $TMUX_SESSION: starting it"
+  settings_stale && cmd_setup
+  cmd_tmux "${CLAUDE_KIMI_DIR:-$(dirname "$(dirname "$(self)")")}" < /dev/null
+}
+
 cmd_status() {
   load_endpoint
   echo "home      $KIMI_HOME$([[ -f $KIMI_HOME/settings.json ]] || echo '  (missing: claude-kimi setup)')"
@@ -243,7 +267,7 @@ cmd_status() {
 }
 
 case ${1:-} in
-  install|setup|check|selftest|tmux|trust|status) c=$1; shift; "cmd_$c" "$@" ;;
+  install|setup|check|selftest|tmux|up|trust|status) c=$1; shift; "cmd_$c" "$@" ;;
   help|-h|--help) sed -n '2,/^set -uo/p' "$(self)" | sed '$d; s/^# \{0,1\}//' ;;
   *)
     settings_stale && cmd_setup > /dev/null
