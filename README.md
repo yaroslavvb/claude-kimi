@@ -128,7 +128,7 @@ public console's $100 meter does not see these requests: they go to the raw endp
 
 | machine | installed | tmux |
 |---|---|---|
-| M5 (`m5-mbp`) | `~/git0/claude-kimi` (Dropbox), `~/.local/bin/claude-kimi` | `kimi-modal`, for testing (the old name, while that session lasts; the next `claude-kimi tmux` opens `claude-kimi`) |
+| M5 (`m5-mbp`) | `~/git0/claude-kimi` (Dropbox), `~/.local/bin/claude-kimi` | none: he ended `kimi-modal` there on Tue 13 Oct 2026 for a fresh start; `claude-kimi tmux` would open `claude-kimi` |
 | mordast (nekko.ai) | `~/claude-kimi` (git clone, updated by bundle over ssh) | `claude-kimi`, kept up by the cron keepalive since Fri 23 Oct 2026 |
 
 On mordast, Roman's vault terms bind Kimi sessions like any other agent: no session reads the Esperanto
