@@ -248,6 +248,9 @@ cmd_up() {  # cron's keepalive: a tmux restart takes the session with it (mordas
   command -v tmux > /dev/null || die "no tmux"
   tmux has-session -t "=$TMUX_SESSION" 2> /dev/null && return 0
   echo "$(date '+%F %T') no tmux session $TMUX_SESSION: starting it"
+  # cron's SHELL is /bin/sh, and a window falls back to $SHELL when claude exits: give it his login shell
+  local sh
+  sh=$(getent passwd "$(id -un)" 2> /dev/null | cut -d: -f7) && [[ -n $sh ]] && export SHELL=$sh
   settings_stale && cmd_setup
   cmd_tmux "${CLAUDE_KIMI_DIR:-$(dirname "$(dirname "$(self)")")}" < /dev/null
 }
